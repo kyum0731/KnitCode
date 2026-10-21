@@ -6,6 +6,7 @@ from .common import ANALYSIS_STATUS, CONTEXT, KIND, LIMITATION, STATUS, indexes,
 from ..insights import REASONS
 from .graph import STYLE as GRAPH_STYLE, render_graph, script_hash
 from .symbols import render_symbol_html
+from .project import render_project_html
 
 
 def esc(value):
@@ -23,7 +24,7 @@ header{background:#123c35;color:#fff;padding:38px;border-radius:20px}h1{font-siz
 """
 
 
-def render_html(result, *, runtime=None):
+def render_html(result, *, runtime=None, explanation=None):
     m, s, insights = result["metadata"], result["stats"], result["insights"]
     nodes, file_nodes, incoming, outgoing, imports = indexes(result)
     edge_by_id = {e["id"]: e for e in result["edges"]}
@@ -46,6 +47,8 @@ def render_html(result, *, runtime=None):
     def edge_table(edges):
         return '<div class="table-wrap"><table><thead><tr><th>소스 표현식</th><th>대상 / 해석 상태</th><th>근거 위치</th></tr></thead><tbody>' + "".join(edge_row(e) for e in edges) + '</tbody></table></div>'
     blocks = []
+    blocks.append(render_project_html(result, runtime=runtime, explanation=explanation))
+    blocks.append(render_graph(result, runtime=runtime))
     blocks.append('<section id="overview"><h2>프로젝트 한눈에 보기</h2><p>' + esc(insights["overview"]["text"]) + '</p><p>' +
                   " ".join(f'<span class="badge {k}">{STATUS[k]} {v}</span>' for k, v in s["calls_by_status"].items()) +
                   f'</p><p class="notice">{LIMITATION}</p><p class="muted">분석 범위: {esc(m["source_root"])} · {"프로젝트 전체의 제외되지 않은 Python 파일" if m["source_root"] == "." else "선택한 소스 루트 안의 Python 파일만 분석"}<br>외부 패키지의 설치·출처를 확인하지 않았습니다. 연결률은 정확도가 아닙니다.</p></section>')
@@ -77,7 +80,6 @@ def render_html(result, *, runtime=None):
     if runtime is not None:
         from .runtime import render_runtime_html
         blocks.append(render_runtime_html(result, runtime))
-    blocks.append(render_graph(result, runtime=runtime))
     blocks.append(render_symbol_html(result))
     metrics = {v["node_id"]: v for v in insights["metrics"]}
     components = {c["file"]: c for c in insights["components"]}
@@ -122,7 +124,7 @@ def render_html(result, *, runtime=None):
     return ('<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
             f'<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'sha256-{script_hash()}\'; style-src \'unsafe-inline\'; base-uri \'none\'; form-action \'none\'">'
             f'<title>KnitCode · 프로젝트 분석</title><style>{STYLE}{GRAPH_STYLE}</style></head><body><div class="layout"><aside><strong>KNITCODE</strong>'
-            '<p class="muted">구조를 읽는 첫 지도</p><nav><a href="#overview">01 · 한눈에 보기</a><a href="#reading">02 · 읽기 시작점</a><a href="#tree">03 · 파일 구조</a><a href="#relations">04 · 파일 간 관계</a><a href="#graph">05 · 관계 그래프</a><a href="#files">06 · 코드 상세</a><a href="#diagnostics">07 · 진단과 한계</a></nav></aside><main>'
-            f'<header><div class="eyebrow">Local Python Analysis / No AI</div><h1>낯선 코드에서<br>읽기 시작점을 찾으세요.</h1><p>{esc(m["project_root"])}</p><span class="badge {m["analysis_status"]}">{ANALYSIS_STATUS[m["analysis_status"]]}</span>'
+            '<p class="muted">구조를 읽는 첫 지도</p><nav><a href="#project-brief">01 · 프로젝트 요약</a><a href="#graph">02 · 전체 구조 그래프</a><a href="#entry-candidates">03 · 실행 후보</a><a href="#overview">04 · 분석 범위</a><a href="#reading">05 · 읽기 시작점</a><a href="#tree">06 · 파일 구조</a><a href="#files">07 · 코드 상세</a><a href="#diagnostics">08 · 진단과 한계</a></nav></aside><main>'
+            f'<header><div class="eyebrow">Local Python Analysis / {"AI Supplement" if explanation is not None or runtime and runtime.get("ai") else "No AI"}</div><h1>프로젝트 구조와<br>{"관측된 실행 흐름" if runtime else "실행 시작점"}을 살펴보세요.</h1><p>{esc(m["project_root"])}</p><span class="badge {m["analysis_status"]}">{ANALYSIS_STATUS[m["analysis_status"]]}</span>'
             f'<div class="meta">소스 루트: {esc(m["source_root"])} · Python {m["python_version"]}<br>분석 시각(UTC): {m["analyzed_at"]}</div></header><div class="stats">{cards}</div>'
             + "".join(blocks) + f'<footer>snapshot: {m["snapshot_id"]}<br>분석기 {m["analyzer_version"]} · 스키마 {result["schema_version"]} · 소요 {s["analysis_seconds"]}초<br>원자료: analysis.json · 문서: report.md · 저장 무결성: manifest.json</footer></main></div></body></html>')

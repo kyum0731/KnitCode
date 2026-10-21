@@ -2,6 +2,8 @@ import re
 from .common import ANALYSIS_STATUS, CONTEXT, KIND, LIMITATION, STATUS, indexes, label, position, signature, target_text, tree
 from ..insights import REASONS
 from .symbols import render_symbol_markdown
+from .graph import render_overview_markdown
+from .project import render_project_markdown
 
 
 def esc(value):
@@ -9,13 +11,13 @@ def esc(value):
     return re.sub(r"([\\`*_{}\[\]()<>#+.!|~\-])", r"\\\1", text)
 
 
-def render_markdown(result):
+def render_markdown(result, *, runtime=None):
     m, s, insights = result["metadata"], result["stats"], result["insights"]
     nodes, file_nodes, incoming, outgoing, imports = indexes(result)
     lines = ["# KnitCode · 프로젝트 분석", "", f"**{ANALYSIS_STATUS[m['analysis_status']]}** · AI 미사용", "",
              f"대상: {esc(m['project_root'])} · 소스 루트: {esc(m['source_root'])}", "",
              f"분석 시각(UTC): {m['analyzed_at']} · snapshot: {m['snapshot_id']}", "",
-             "## 프로젝트 한눈에 보기", "", esc(insights["overview"]["text"]), "",
+             render_project_markdown(result, runtime=runtime), "", "## 프로젝트 한눈에 보기", "", esc(insights["overview"]["text"]), "",
              f"파싱 성공 {s['parsed_file_count']} / 실패 {s['parse_failed_file_count']} · 호출 위치 {s['call_count']}", "",
              " · ".join(f"{STATUS[k]} {v}" for k, v in s["calls_by_status"].items()), "",
              LIMITATION, "", "열은 0부터 시작하는 UTF-8 바이트 수이고, 끝 위치는 제외합니다.", "",
@@ -41,7 +43,7 @@ def render_markdown(result):
         lines.append("분석된 내부 파일 간 연결이 없습니다.")
     if len(relations) > 20:
         lines.append(f"전체 {len(relations)}개 중 20개 표시. 나머지는 HTML 전체 관계와 analysis.json에서 확인하세요.")
-    lines += ["", render_symbol_markdown(result), "", "## 파일·코드 상세", ""]
+    lines += ["", render_overview_markdown(result), "", render_symbol_markdown(result), "", "## 파일·코드 상세", ""]
     components = {c["file"]: c for c in insights["components"]}
     metrics = {v["node_id"]: v for v in insights["metrics"]}
     for file in result["files"]:

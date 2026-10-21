@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import sys
 import threading
+import time
 import tokenize
 import types
 
@@ -23,6 +24,8 @@ class Collector:
         self.reasons = set()
         self.expected, self.cache, self.positions = {}, {}, {}
         self.tool_id = None
+        self.started_ns = 0
+        self.invocations = {}
         self.nodes = {n["id"]: n for n in analysis["nodes"]}
         self.files = {str((self.root / f["path"]).resolve()): f for f in analysis["files"]}
         self.internal_files = {str(Path(__file__).resolve()), str(Path(__file__).with_name("_runtime_worker.py").resolve())}
@@ -124,6 +127,7 @@ class Collector:
     def _handle(self, event, code, offset, frame, exception=None):
         if not self.active:
             return
+        timestamp_ns = time.perf_counter_ns() - self.started_ns
         try:
             node_id = self.identify(code)
             if not node_id or not self.active:
@@ -134,14 +138,29 @@ class Collector:
             if frame.f_code is not code:
                 self.notice("frame_unavailable")
                 return
-            item = {"event": event, "node_id": node_id, "location": self.location(frame, node_id, offset)}
+            item = {"event": event, "node_id": node_id, "location": self.location(frame, node_id, offset),
+                    "timestamp_ns": timestamp_ns}
             if event == "start":
+                # IDs belong to invocations, so recursive calls remain distinct.
+                ancestor = frame.f_back
+                while ancestor is not None and id(ancestor) not in self.invocations:
+                    ancestor = ancestor.f_back
+                parent = self.invocations.get(id(ancestor)) if ancestor is not None else None
+                invocation = {"invocation_id": self.seq + 1,
+                              "parent_invocation_id": parent["invocation_id"] if parent else None,
+                              "depth": parent["depth"] + 1 if parent else 0}
+                self.invocations[id(frame)] = invocation
+                item.update(invocation)
                 caller = frame.f_back
                 caller_id = self.identify(caller.f_code) if caller else None
                 item["caller_id"] = caller_id
                 item["caller_relation"] = "python_frame_parent"
                 item["caller_location"] = self.location(caller, caller_id) if caller_id else None
                 item["entry_kind"] = self.nodes[node_id]["type"]
+            else:
+                item.update(self.invocations.get(id(frame), {}))
+                if event in {"return", "unwind"}:
+                    self.invocations.pop(id(frame), None)
             if exception is not None:
                 cls = type(exception)
                 item["exception_type"] = type.__getattribute__(cls, "__module__") + "." + type.__getattribute__(cls, "__qualname__")
@@ -192,6 +211,7 @@ class Collector:
             mask |= event
         sys.addaudithook(self.audit)
         self.active = True
+        self.started_ns = time.perf_counter_ns()
         mon.set_events(self.tool_id, mask)
 
     def stop_events(self):
@@ -235,6 +255,66 @@ def summarize(analysis, events):
                 calls[key]["event_sequences"].append(event["seq"])
         if event["event"] in {"raise", "unwind"}:
             exceptions.append(event)
-    return {"runtime_schema_version": "1.0", "snapshot_id": analysis["metadata"]["snapshot_id"],
+    spans, timings = summarize_timing(nodes, events)
+    functions = [n["id"] for n in nodes.values() if n["type"] in {"function", "method"}]
+    observed = [nid for nid in functions if nid in entries]
+    return {"runtime_schema_version": "1.1", "snapshot_id": analysis["metadata"]["snapshot_id"],
             "observed_calls": list(calls.values()), "node_entries": entries,
-            "exceptions": exceptions, "event_count": len(events), "limitations": sorted(reasons)}
+            "exceptions": exceptions, "event_count": len(events), "limitations": sorted(reasons),
+            "invocations": spans, "node_timings": timings,
+            "function_coverage": {"total": len(functions), "observed": len(observed),
+                                  "percent": round(100 * len(observed) / len(functions), 2) if functions else None,
+                                  "unobserved_node_ids": [nid for nid in functions if nid not in entries]}}
+
+
+def summarize_timing(nodes, events):
+    """Pair explicit invocation IDs; truncated spans have no invented end time.
+
+    Self time excludes nearest *observed* child spans, including callbacks across
+    external frames. External work and collector overhead remain in wall time.
+    Legacy 1.0 events have no timing information and produce no spans.
+    """
+    spans = {}
+    for event in events:
+        iid, timestamp = event.get("invocation_id"), event.get("timestamp_ns")
+        if iid is None or not isinstance(timestamp, int) or timestamp < 0:
+            continue
+        if event["event"] == "start" and event.get("node_id") in nodes:
+            spans[iid] = {"invocation_id": iid, "node_id": event["node_id"],
+                          "parent_invocation_id": event.get("parent_invocation_id"),
+                          "depth": event.get("depth", 0), "start_seq": event["seq"],
+                          "end_seq": None, "start_ns": timestamp, "end_ns": None,
+                          "duration_ns": None, "self_ns": None, "outcome": "incomplete"}
+        elif event["event"] in {"return", "unwind"} and iid in spans:
+            span = spans[iid]
+            if span["node_id"] == event.get("node_id") and timestamp >= span["start_ns"] and span["end_seq"] is None:
+                span.update(end_seq=event["seq"], end_ns=timestamp, duration_ns=timestamp - span["start_ns"],
+                            outcome=event["event"])
+    children = {}
+    for span in spans.values():
+        children.setdefault(span["parent_invocation_id"], []).append(span)
+    timings = {}
+    for span in spans.values():
+        duration = span["duration_ns"]
+        nested = children.get(span["invocation_id"], [])
+        if duration is not None and all(c["duration_ns"] is not None and
+                                        span["start_ns"] <= c["start_ns"] <= c["end_ns"] <= span["end_ns"] for c in nested):
+            span["self_ns"] = max(0, duration - sum(c["duration_ns"] for c in nested))
+        nid = span["node_id"]
+        if nodes[nid]["type"] not in {"function", "method"}:
+            continue
+        metric = timings.setdefault(nid, {"node_id": nid, "count": 0, "completed_count": 0,
+                                         "incomplete_count": 0, "inclusive_ns": 0, "self_ns": 0,
+                                         "self_sample_count": 0, "max_ns": None, "average_ns": None})
+        metric["count"] += 1
+        if duration is None:
+            metric["incomplete_count"] += 1
+        else:
+            metric["completed_count"] += 1
+            metric["inclusive_ns"] += duration
+            metric["max_ns"] = max(metric["max_ns"] or 0, duration)
+            metric["average_ns"] = metric["inclusive_ns"] // metric["completed_count"]
+            if span["self_ns"] is not None:
+                metric["self_ns"] += span["self_ns"]
+                metric["self_sample_count"] += 1
+    return list(spans.values()), sorted(timings.values(), key=lambda m: (-m["inclusive_ns"], m["node_id"]))

@@ -20,6 +20,20 @@ unverified hypotheses, never modifications to static edges. Use an empty list wh
 Do not claim evidence supports more than its supplied source range. Explain missing context.
 """
 
+PROJECT_PROMPT = SYSTEM_PROMPT + """
+This packet contains static structure/candidate heuristics and optionally runtime observations,
+not source snippets. Explain the whole project briefly in Korean, then discuss plausible
+entry candidates and observed flow. Candidate scores are rankings, never probabilities.
+When runtime observations are supplied, compare static expectations with the observed paths,
+explain coverage gaps and timing limitations, and suggest concrete follow-up analysis supported
+by the evidence. Suggestions are not executions or confirmed defects. Separate facts from inference.
+File/range fields locate snapshot anchors; project_summary facts describe the analyzed scope.
+Use only runtime_observation or node_facts.observed_entries/timing for actual execution claims.
+An unobserved function is not proof of dead code. Author docstrings are unverified author claims.
+Do not invent business purpose, inputs, commands or missing executions. Do not select or run a
+candidate. Prefer no suggested_relations; any suggestions remain unverified and outside the graph.
+"""
+
 
 class AIError(ValueError):
     """A bounded, safe-to-display failure (never contains server response bodies)."""
@@ -79,7 +93,7 @@ def validate_answer(answer, context):
     return answer
 
 
-def explain(context, *, base_url, model, api_key="", timeout=60, provider="api", num_ctx=16384):
+def explain(context, *, base_url, model, api_key="", timeout=60, provider="api", num_ctx=16384, purpose="code"):
     endpoint, local = endpoint_url(base_url, provider)
     if not model or len(model) > 200 or not 1 <= timeout <= 600:
         raise AIError("모델명과 1~600초의 timeout이 필요합니다.")
@@ -95,7 +109,13 @@ def explain(context, *, base_url, model, api_key="", timeout=60, provider="api",
         raise AIError("API 키에 허용하지 않는 문자나 줄바꿈이 있습니다.")
     if not context["evidence"] or context["selected_node_id"] not in {s["node_id"] for s in context["evidence"]}:
         raise AIError("선택한 대상의 원문을 예산 안에 담지 못했습니다. 문맥 예산을 늘리거나 더 작은 정의를 선택하세요.")
-    messages = [{"role": "system", "content": SYSTEM_PROMPT},
+    if purpose not in {"code", "project", "plan", "guide"}:
+        raise AIError("지원하지 않는 AI 설명 목적입니다.")
+    prompt = PROJECT_PROMPT if purpose == "project" else SYSTEM_PROMPT
+    if purpose in {"plan", "guide"}:
+        from .study_context import PLAN_PROMPT, GUIDE_PROMPT
+        prompt = PLAN_PROMPT if purpose == "plan" else GUIDE_PROMPT
+    messages = [{"role": "system", "content": prompt},
                 {"role": "user", "content": json.dumps(context, ensure_ascii=False)}]
     payload = {"model": model, "messages": messages, "response_format": {"type": "json_object"},
                "max_completion_tokens": 4096, "stream": False}
@@ -126,7 +146,12 @@ def explain(context, *, base_url, model, api_key="", timeout=60, provider="api",
             if choice.get("finish_reason") != "stop" or choice["message"].get("refusal"):
                 raise AIError("AI 응답이 완료되지 않았거나 모델이 요청을 거부했습니다.")
             content = choice["message"]["content"]
-        answer = validate_answer(json.loads(content), context)
+        answer = json.loads(content)
+        if purpose in {"plan", "guide"}:
+            from .study_context import validate_plan, validate_guide
+            answer = (validate_plan if purpose == "plan" else validate_guide)(answer, context)
+        else:
+            answer = validate_answer(answer, context)
     except HTTPError as error:
         raise AIError(f"AI HTTP 오류 {error.code}. 주소·모델·인증·서버 설정을 확인하세요.") from None
     except (URLError, OSError, TimeoutError):
@@ -136,4 +161,6 @@ def explain(context, *, base_url, model, api_key="", timeout=60, provider="api",
     return {"status": "complete", "provider": "ollama_local" if provider == "ollama" else "chat_completions_compatible", "endpoint": endpoint,
             "model": model, "prompt_version": context["prompt_version"], "input_hash": context["input_hash"],
             "request_hash": digest(payload), "snapshot_id": context["snapshot_id"], "context": context,
-            "answer": answer, "validation": "근거 ID·원문 해시·위치를 검사했습니다. 설명 내용의 정확성 검증은 아닙니다."}
+            "answer": answer, "validation": ("근거 ID와 제공된 스냅샷 위치를 대조했습니다. 설명 내용의 정확성 검증은 아닙니다."
+                                              if purpose in {"project", "guide"} else "근거 ID·후보·입력 계약을 검사했습니다. 입력의 업무상 적합성 검증은 아닙니다."
+                                              if purpose == "plan" else "근거 ID·원문 해시·위치를 검사했습니다. 설명 내용의 정확성 검증은 아닙니다.")}

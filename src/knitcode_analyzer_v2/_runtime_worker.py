@@ -1,6 +1,7 @@
 """Launched by absolute path in the selected Python; target runs only here."""
 
 import json
+import inspect
 import os
 from pathlib import Path
 import platform
@@ -28,11 +29,21 @@ def main():
             os.chdir(config["cwd"])
             target = config["script"] or config["module"]
             sys.argv = [target, *config["args"]]
-            sys.path[0] = str(Path(target).parent) if config["script"] else config["cwd"]
+            sys.path[0] = str(Path(target).parent) if config["script"] else config.get("import_root") or config["cwd"]
             collector.start()
             code = 0
             try:
-                if config["script"]:
+                if config.get("callable"):
+                    # Loading a function's module still executes its top-level code.
+                    namespace = (runpy.run_path(config["script"], run_name="__knitcode_entry__") if config["script"] else
+                                 runpy.run_module(config["module"], run_name="__knitcode_entry__", alter_sys=True))
+                    function = namespace.get(config["callable"])
+                    if (not inspect.isfunction(function) or inspect.iscoroutinefunction(function) or inspect.isgeneratorfunction(function)
+                            or inspect.isasyncgenfunction(function) or collector.identify(function.__code__) != config["callable_node_id"]):
+                        raise ValueError("선택한 정적 함수와 실행 객체가 일치하지 않거나 지원 범위 밖입니다 (래퍼·재정의·비동기·제너레이터).")
+                    inspect.signature(function).bind(*config["call_args"], **config["call_kwargs"])
+                    function(*config["call_args"], **config["call_kwargs"])
+                elif config["script"]:
                     runpy.run_path(config["script"], run_name="__main__")
                 else:
                     runpy.run_module(config["module"], run_name="__main__", alter_sys=True)

@@ -47,16 +47,35 @@ def validate_output_directory(directory, project, source):
     return directory
 
 
-def write_report(result, directory, *, runtime=None):
+def write_report(result, directory, *, runtime=None, explanation=None, study=None):
     validate_result(result)
     project = Path(result["metadata"]["project_root"])
     source = project / result["metadata"]["source_root"]
     directory = validate_output_directory(directory, project, source)
-    markdown = render_markdown(result)
+    markdown = render_markdown(result, runtime=runtime)
     if runtime is not None:
+        from .reports.project import render_review_markdown
+        markdown += render_review_markdown(runtime.get("review"))
         from .reports.runtime import render_runtime_markdown
         markdown += render_runtime_markdown(result, runtime)
-    texts = {"analysis.json": to_json(result), "report.md": markdown, "report.html": render_html(result, runtime=runtime)}
+    from .reports.project import render_project_ai_markdown
+    markdown += render_project_ai_markdown(runtime.get("ai") if runtime else explanation)
+    if explanation is not None or runtime and runtime.get("ai"):
+        markdown = markdown.replace("** · AI 미사용", "** · AI 보완 설명 별도 포함", 1)
+    page = render_html(result, runtime=runtime, explanation=explanation)
+    if study is not None:
+        from .reports.study import render_study_html, render_study_markdown
+        page = page.replace('</header>', '</header>' + render_study_html(study), 1)
+        page = page.replace('<title>KnitCode · 프로젝트 분석</title>', '<title>KnitCode · AI·동적 프로젝트 이해</title>', 1)
+        page = page.replace('Local Python Analysis / No AI', 'Local Python Analysis / AI Planning &amp; Dynamic Study', 1)
+        page = page.replace('<nav>', '<nav><a href="#study">프로젝트 이해 안내</a><a href="#attempts">AI 입력과 실행 기록</a>', 1)
+        page = page.replace('원자료: run.json · summary.json · events.jsonl · stdout.log · stderr.log · 실행 무결성: run-manifest.json',
+                            '마지막 기본 실행의 원자료·로그·run-manifest.json은 위 실행 기록의 개별 동적 보고서 폴더에서 확인하세요.')
+        page = page.replace('함수는 명시적으로 선택해야 하며 필요한 값을 자동 생성하지 않습니다.',
+                            '이 통합 분석에서는 AI가 후보와 합성 입력을 계획했습니다. 실제 선택은 위 실행 기록에서 확인하세요.')
+        markdown = render_study_markdown(study) + '\n' + markdown
+        markdown = markdown.replace('** · AI 미사용', '** · AI 입력 계획·프로젝트 안내 포함', 1)
+    texts = {"analysis.json": to_json(result), "report.md": markdown, "report.html": page}
     manifest = {"producer": "knitcode_analyzer_v2", "schema_version": result["schema_version"],
                 "project_root": project.as_posix(), "snapshot_id": result["metadata"]["snapshot_id"],
                 "artifacts": {name: hashlib.sha256(value.encode("utf-8")).hexdigest() for name, value in texts.items()}}
