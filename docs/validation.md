@@ -1,5 +1,22 @@
 # 구현 검증 기록
 
+## 로컬 Ollama study 응답·문맥 보완 (2026-10-22)
+
+- 전체 회귀 테스트 148개 중 **145개 통과, 3개 건너뜀**. 기존 Windows 심볼릭 링크 권한 및 선택 도구 실제 실행 테스트는 이번 변경 검증에서 건너뛰었다.
+- 추가 테스트 8개: 파일/함수/중단 JSON Schema, 알 수 없는 후보·근거·경로·인자 채널 거부, 큰 문맥 제한과 원본 보존, 누락 근거 인용 거부, 입력 구문 단위 보존·생략 수, 오류 분류·발췌 제한·HTTP 오류 본문 미저장, 실패 파일의 manifest 보존, 너무 작은 예산의 요청 전 거부를 확인했다.
+- 실제 Ollama **0.40.8**, **qwen2.5-coder:7b**, 문맥 **8192**, CPU 환경에서 작은 예제의 AI 계획·동적 실행·최종 설명을 수행했다. 약 **86.6초**, `complete`, 함수 1/1 관측, manifest 검증 성공. 결과: `reports/local-ai-fix-smoke/studies/20261022T100005-a019410c79a9/`.
+- Sublist3r 실제 모델 요청에서 추가로 발견한 파일/함수 인자 혼동을 Schema 분기로 제한하고, 함수 시그니처·docstring의 우선순위와 args/stdin 지시를 보완했다. 수정 전후 요청 자료는 `reports/local-ai-fix-sublist3r-diagnostic/`에 있다. 형식 통과만으로 업무상 적절한 입력·설명을 보장하지는 않는다.
+- 최종 코드로 Sublist3r 통합 실행을 **1회** 수행했다. 검증용 호출 래퍼는 실제 모델 응답을 그대로 사용하되, 사전에 읽은 `parser_error`·`subdomain_sorting_key` 함수 또는 도움말 외의 계획은 실행 전에 거부하도록 제한했다. 모델이 선택한 `sublist3r.py::parser_error("errmsg")`를 실제 복사본에서 실행했다. 외부 도메인 검색은 수행하지 않았다.
+- 해당 실행은 약 **112.1초**, 상태 `complete`, 실행 `finished`, 추적 `complete_within_scope`, 종료 코드 0, 함수 **2/99** 관측이었다. 최종 AI 설명도 성공했으며 `verify_study`가 참이다. 결과: `reports/sublist3r-fixed-offline/studies/20261022T101704-31a7fd97ffa9/`.
+- 이 결과의 plan 문맥은 원본 약 72KB에서 약 3.4KB, guide 문맥은 실행 피드백 포함 원본 약 80KB에서 약 2.5KB로 줄었다. 실제 입력 토큰·처리 시간은 각 JSON의 `diagnostics.response_metrics`에 있다. 바이트 수는 전체 요청 크기나 토큰 수와 다르다.
+- 설명은 요약 수준이며 일반적인 문구도 포함되어 있다. 최종 `complete`는 제한된 경로의 수집·설명 완료이지 전체 서브도메인 검색, 함수 전체 관측, 설명 의미의 정확성이나 7B 모델의 성능 보장이 아니다. HTML의 브라우저 육안 검수는 이번에 수행하지 않았다.
+- `git diff --check`와 LOCAL_AI_GUIDE의 PowerShell 블록 16개 문법을 확인했다. 테스트 전용 jsonschema는 `build/ai-fix-test-deps`에 설치했으며 기본 분석기의 의존성은 추가하지 않았다.
+
+```powershell
+$env:PYTHONPATH = "$PWD/src;$PWD/build/ai-fix-test-deps;$env:PYTHONPATH"
+python -B -m unittest discover -s tests -t . -q
+```
+
 갱신일: 2026-10-21 · 분석기 0.4.0 · 정적 계약 2.1 / 동적 계약 1.1
 
 ## AI·동적 통합 분석 검증 (2026-10-21)

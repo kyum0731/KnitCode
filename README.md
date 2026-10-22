@@ -3,6 +3,7 @@
 로컬 Python 프로젝트의 구조를 정적으로 분석하고, AI가 만든 입력으로 실행 흐름을 관측하여 **처음 보는 사람을 위한 프로젝트 이해 보고서**를 만드는 도구입니다.
 
 - 순서대로 실행하려면 [RUN_GUIDE.md](RUN_GUIDE.md)를 참고하세요.
+- 무료 로컬 모델 설치·선택·실행은 [LOCAL_AI_GUIDE.md](LOCAL_AI_GUIDE.md)를 참고하세요.
 - 분석 입력·처리·산출물의 전체 흐름은 [ANALYSIS_FLOW.md](ANALYSIS_FLOW.md)에 정리했습니다.
 - 기본 정적 분석은 대상 실행이나 AI 연결 없이 동작합니다.
 
@@ -73,6 +74,8 @@ python -m knitcode_analyzer_v2.study "C:/work/my-project" --ai api --report-dir 
 ```
 
 URL·모델·키는 실제 서비스의 값으로 바꿉니다. 실제 키를 문서나 소스에 저장하지 마세요. Ollama 기본 주소는 `http://127.0.0.1:11434`이며 `KNITCODE_OLLAMA_BASE_URL`, `KNITCODE_OLLAMA_MODEL`도 지원합니다. `--base-url`, `--model`, `--ai-timeout`, `--num-ctx`로 설정을 바꿀 수 있습니다.
+
+Ollama `study`는 JSON Schema로 파일 실행·함수 실행·중단과 설명 형식을 구분하고, 계획/설명에 필요한 근거를 따로 선별합니다. 짧은 출력과 입력 예산을 적용하므로 AI 설명은 제공한 일부 근거에 대한 요약입니다. 전체 정적·동적 결과는 그대로 보존합니다. CPU 환경에서는 `--num-ctx 8192 --ai-timeout 600 --max-attempts 1`로 시작할 수 있습니다. 실패하면 `study.json`의 `ai_settings`와 `plan-N-failed.json` 또는 `guide.json`의 `diagnostics`에서 설정·오류 종류·입력 크기·제한된 응답 발췌를 확인하세요.
 
 이미 생성한 정적 보고서를 연결하려면 명령에 `--static-report "정적 보고서 폴더 또는 report.html"`을 추가합니다. 연결하지 않아도 통합 실행이 정적 보고서를 먼저 저장합니다.
 

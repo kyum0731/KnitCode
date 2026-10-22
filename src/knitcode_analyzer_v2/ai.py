@@ -1,6 +1,7 @@
 """Explicit Chat Completions / local Ollama adapters with shared evidence checks."""
 
 import json
+import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
@@ -36,7 +37,11 @@ candidate. Prefer no suggested_relations; any suggestions remain unverified and 
 
 
 class AIError(ValueError):
-    """A bounded, safe-to-display failure (never contains server response bodies)."""
+    """Safe message plus bounded diagnostics; HTTP error bodies are never retained."""
+
+    def __init__(self, message, *, diagnostics=None):
+        super().__init__(message)
+        self.diagnostics = diagnostics or {}
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -112,16 +117,29 @@ def explain(context, *, base_url, model, api_key="", timeout=60, provider="api",
     if purpose not in {"code", "project", "plan", "guide"}:
         raise AIError("지원하지 않는 AI 설명 목적입니다.")
     prompt = PROJECT_PROMPT if purpose == "project" else SYSTEM_PROMPT
+    output_limit, schema, preparation = 4096, "json", {}
     if purpose in {"plan", "guide"}:
         from .study_context import PLAN_PROMPT, GUIDE_PROMPT
+        from .study_requests import compact_json, prepare_study_request
         prompt = PLAN_PROMPT if purpose == "plan" else GUIDE_PROMPT
+        output_limit = 1024 if purpose == "plan" else 1536
+        prompt += ("\nKeep reasons brief. Use the smallest input; fixtures are optional. If inputs or effects are uncertain, stop."
+                   if purpose == "plan" else
+                   "\nWrite one short Korean sentence per claim. At most 3 items per section and 4 limitations. Report omissions.")
+        context, schema, preparation = prepare_study_request(context, purpose, prompt, num_ctx, output_limit,
+                                                             structured=provider == "ollama")
+        context_text = compact_json(context)
+    else:
+        context_text = json.dumps(context, ensure_ascii=False)
     messages = [{"role": "system", "content": prompt},
-                {"role": "user", "content": json.dumps(context, ensure_ascii=False)}]
+                {"role": "user", "content": context_text}]
     payload = {"model": model, "messages": messages, "response_format": {"type": "json_object"},
-               "max_completion_tokens": 4096, "stream": False}
+               "max_completion_tokens": output_limit, "stream": False}
     if provider == "ollama":
-        payload = {"model": model, "messages": messages, "format": "json", "stream": False,
-                   "options": {"num_predict": 4096, "num_ctx": num_ctx}}
+        payload = {"model": model, "messages": messages, "format": schema, "stream": False,
+                   "options": {"num_predict": output_limit, "num_ctx": num_ctx}}
+        if purpose in {"plan", "guide"}:
+            payload["options"]["temperature"] = 0
     raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     if len(raw) > 1_000_000:
         raise AIError("AI 요청이 1MB를 초과했습니다. 문맥 예산을 줄이세요.")
@@ -131,6 +149,15 @@ def explain(context, *, base_url, model, api_key="", timeout=60, provider="api",
     # Local requests bypass proxy environment variables; remote HTTPS honors them.
     opener = build_opener(NoRedirect(), *([ProxyHandler({})] if local else []))
     request = Request(endpoint, data=raw, headers=headers, method="POST")
+    started = time.monotonic()
+    diagnostics = {"model": model, "endpoint": endpoint, "purpose": purpose, "num_ctx": num_ctx,
+                   "timeout_seconds": timeout, "output_limit": output_limit, "request_bytes": len(raw),
+                   "request_hash": digest(payload), "input_hash": context["input_hash"], **preparation}
+    def failure(message, category):
+        diagnostics.update(error_category=category, elapsed_seconds=round(time.monotonic() - started, 3))
+        if purpose in {"plan", "guide"}:
+            diagnostics["request_context"] = context
+        return AIError(message, diagnostics=diagnostics)
     try:
         with opener.open(request, timeout=timeout) as response:
             response_raw = response.read(2_000_001)
@@ -138,6 +165,13 @@ def explain(context, *, base_url, model, api_key="", timeout=60, provider="api",
             raise AIError("AI 응답이 2MB 제한을 초과했습니다.")
         body = json.loads(response_raw)
         if provider == "ollama":
+            diagnostics["response_metrics"] = {k: body[k] for k in
+                ("done_reason", "prompt_eval_count", "eval_count", "total_duration", "load_duration",
+                 "prompt_eval_duration", "eval_duration") if isinstance(body.get(k), (str, int, float, bool))}
+            generated = body.get("message", {}).get("content", "") if isinstance(body.get("message"), dict) else ""
+            if isinstance(generated, str) and purpose in {"plan", "guide"}:
+                diagnostics["response_excerpt"] = generated[:4096]
+                diagnostics["response_excerpt_truncated"] = len(generated) > 4096
             if body.get("done") is not True or body.get("done_reason") != "stop":
                 raise AIError("Ollama 응답이 완료되지 않았거나 출력 한도에서 중단됐습니다.")
             content = body["message"]["content"]
@@ -153,14 +187,25 @@ def explain(context, *, base_url, model, api_key="", timeout=60, provider="api",
         else:
             answer = validate_answer(answer, context)
     except HTTPError as error:
-        raise AIError(f"AI HTTP 오류 {error.code}. 주소·모델·인증·서버 설정을 확인하세요.") from None
-    except (URLError, OSError, TimeoutError):
-        raise AIError("AI 연결 또는 응답 시간 오류. 정적 분석 결과는 그대로 사용할 수 있습니다.") from None
+        raise failure(f"AI HTTP 오류 {error.code}. 주소·모델·인증·서버 설정을 확인하세요.", "http") from None
+    except TimeoutError:
+        raise failure("AI 응답 대기 시간이 초과되었습니다. 입력 크기·CPU/GPU 배치·시간 제한을 확인하세요.", "timeout") from None
+    except URLError as error:
+        if isinstance(error.reason, TimeoutError):
+            raise failure("AI 연결 대기 시간이 초과되었습니다.", "timeout") from None
+        raise failure("AI 서버 연결에 실패했습니다. 서버 실행 여부와 주소를 확인하세요.", "connection") from None
+    except OSError:
+        raise failure("AI 서버 통신에 실패했습니다. 서버 로그를 확인하세요.", "connection") from None
     except (KeyError, IndexError, TypeError, AttributeError, UnicodeError, json.JSONDecodeError):
-        raise AIError("AI 서버가 유효한 JSON 응답 계약을 반환하지 않았습니다.") from None
+        raise failure("AI 서버가 유효한 JSON 응답 계약을 반환하지 않았습니다.", "response_format") from None
+    except AIError as error:
+        raise failure(str(error), "response_validation") from None
+    diagnostics["elapsed_seconds"] = round(time.monotonic() - started, 3)
+    diagnostics.pop("response_excerpt", None)
+    diagnostics.pop("response_excerpt_truncated", None)
     return {"status": "complete", "provider": "ollama_local" if provider == "ollama" else "chat_completions_compatible", "endpoint": endpoint,
             "model": model, "prompt_version": context["prompt_version"], "input_hash": context["input_hash"],
             "request_hash": digest(payload), "snapshot_id": context["snapshot_id"], "context": context,
-            "answer": answer, "validation": ("근거 ID와 제공된 스냅샷 위치를 대조했습니다. 설명 내용의 정확성 검증은 아닙니다."
+            "answer": answer, "diagnostics": diagnostics, "validation": ("근거 ID와 제공된 스냅샷 위치를 대조했습니다. 설명 내용의 정확성 검증은 아닙니다."
                                               if purpose in {"project", "guide"} else "근거 ID·후보·입력 계약을 검사했습니다. 입력의 업무상 적합성 검증은 아닙니다."
                                               if purpose == "plan" else "근거 ID·원문 해시·위치를 검사했습니다. 설명 내용의 정확성 검증은 아닙니다.")}

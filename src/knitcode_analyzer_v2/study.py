@@ -104,6 +104,9 @@ def study_project(project, *, ai_options, report_dir=None, static_report=None, s
               "created_at": datetime.now(timezone.utc).isoformat(), "project_root": str(root),
               "static_input": str(static_dir) if static_dir else None, "status": "running", "attempts": [],
               "max_attempts": max_attempts, "timeout_per_run": timeout, "supplements": [],
+              "ai_settings": {k: ai_options.get(k, default) for k, default in
+                              (("provider", "api"), ("model", None), ("base_url", None),
+                               ("timeout", 60), ("num_ctx", 16384))},
               "limitations": ["복사본 실행은 보안 샌드박스가 아닙니다. 외부 서비스·절대 경로·자식 프로세스 부작용을 차단하지 않습니다.",
                               "AI 입력은 합성 예시입니다. 자격증명·서비스·복잡한 객체·실시간 대화는 자동 해결하지 않습니다.",
                               "각 시도는 새 복사본에서 실행하며 호출 순서·시간은 시도별로 구분합니다."]}
@@ -153,6 +156,10 @@ def study_project(project, *, ai_options, report_dir=None, static_report=None, s
                     break
             except (AIError, ValueError, OSError) as error:
                 attempt.update(status="failed", error=str(error))
+                if isinstance(error, AIError):
+                    attempt["ai_diagnostics"] = error.diagnostics
+                    (directory / f"plan-{index + 1}-failed.json").write_text(to_json({
+                        "status": "failed", "error": str(error), "diagnostics": error.diagnostics}), encoding="utf-8")
                 context["attempts"].append({"number": index + 1, "error": str(error)})
             (directory / "study.json").write_text(to_json(record), encoding="utf-8")
         if latest_plan and supplements and record["status"] != "cancelled":
@@ -174,6 +181,8 @@ def study_project(project, *, ai_options, report_dir=None, static_report=None, s
                 guide = explain(context, purpose="guide", **ai_options)
             except (AIError, ValueError, OSError) as error:
                 guide = {"status": "failed", "error": str(error), "context": context}
+                if isinstance(error, AIError):
+                    guide["diagnostics"] = error.diagnostics
             (directory / "guide.json").write_text(to_json(guide), encoding="utf-8")
             record["guide"] = guide
             failures = any(a["status"] == "failed" or a.get("feedback", {}).get("execution_status") != "finished" or

@@ -42,6 +42,12 @@ F는 기존 HTML 보고서에 포함되는 오프라인 관계 탐색기다. I�
 
 `--provider ollama`는 별도 [Ollama 네이티브 Chat API](https://docs.ollama.com/api/chat) 어댑터다. 기본 `http://127.0.0.1:11434/api/chat`에 요청하며 루프백 주소만 허용한다. `format: json`, `stream: false`, `options.num_predict: 4096`, 설정 가능한 `options.num_ctx`(기본 16384)를 사용한다. `done: true`, `done_reason: stop` 응답만 처리한다. 외부 API 환경 변수와 키를 사용하지 않으며 알려진 cloud 모델 태그를 거부한다. 서버의 임의 프록시나 사용자 정의 모델 동작까지 검증하지는 않으므로 로컬 전용 사용에는 다운로드한 모델과 `OLLAMA_NO_CLOUD=1`로 시작한 서버를 사용한다.
 
+2026-10-22: 위 기본값과 달리 `study`의 plan/guide 요청은 목적별 입력 요약을 사용한다. Ollama에는 파일 실행·함수 실행·중단을 구분한 JSON Schema 또는 최종 안내 Schema를 전달한다. 후보·근거 ID·경로 enum과 필수 필드를 제한하되 기존 Python 검증도 유지한다. 출력 예산은 계획 1024·안내 1536토큰, 온도는 0이다. 다른 `assist/runtime/review` 요청 계약은 그대로다.
+
+`study_requests.py`는 원본 분석을 변경하지 않고 후보·입력 구문·최근 피드백 또는 구조·실행 집계를 우선 선택한다. UTF-8 바이트당 1토큰을 예약하는 보수적 근사와 256토큰 framing 여유를 사용해 프롬프트·문맥·Schema를 제한하고, 큰 설정에서도 입력 예산은 18000바이트로 제한한다. 실제 모델 tokenizer로 계산한 토큰 수는 아니며 실제 처리량은 Ollama 응답 metrics에 기록한다. 입력 구문은 완전한 식 단위로 선택하고 생략 수를 남긴다. 긴 문서·docstring과 디렉터리 목록은 발췌이므로 생략 영역의 의미를 검증한 것이 아니다.
+
+`study.json.ai_settings`와 각 요청의 `diagnostics`에 설정·입력 해시·전후 크기·생략량·시간·Ollama 처리 토큰을 기록한다. AI 계획 실패는 `plan-N-failed.json`에도 저장하며 study manifest에 포함한다. 로컬 모델의 실패 생성문은 최대 4096자만 저장하고, 실제 전송한 제한 문맥도 기록한다. HTTP 오류 본문·인증 헤더·API 키는 저장하지 않는다. 연결 오류와 timeout은 분리한다. 결과에는 코드·문서에서 유래한 문자열이 포함될 수 있다.
+
 - `explain`만 전송하며 질문·선택 원문·상대 경로·정적 관계·분석 범위가 요청에 담긴다. 주소와 모델, 제공 원문 수를 stderr에 표시한다.
 - 원격 HTTPS, 루프백 HTTP/HTTPS 지원. HTTP 루프백은 `localhost`, `127.0.0.1`, `::1`로 한정한다. 루프백은 프록시를 우회하고 리디렉션은 모두 거부한다.
 - 요청은 최대 1MB, 응답은 최대 2MB, 연결·읽기 timeout은 기본 60초(설정 1~600초)다. timeout은 소켓 작업 제한이며 전체 작업의 엄격한 벽시계 시간 상한은 아니다. 자동 재시도하지 않는다.
